@@ -86,6 +86,7 @@ class PTLikePrior(object):
         self.logpargs = logpargs
         self.loglkwargs = loglkwargs
         self.logpkwargs = logpkwargs
+        self._has_meta_blob = None
 
     def __call__(self, x):
         lp = self.logp(x, *self.logpargs, **self.logpkwargs)
@@ -93,8 +94,13 @@ class PTLikePrior(object):
         if lp == float('-inf'):
             return lp, lp
 
-        return self.logl(x, *self.loglargs, **self.loglkwargs), lp
+        ll = self.logl(x, *self.loglargs, **self.loglkwargs)
 
+        if self._has_meta_blob or type(ll) in [list, tuple]:
+            self._has_meta_blob = True
+            return ll[0], lp, ll[1]
+        else:
+            return ll, lp
 
 class PTSampler(Sampler):
     """
@@ -180,6 +186,7 @@ class PTSampler(Sampler):
         self._chain = None
         self._lnprob = None
         self._lnlikelihood = None
+        self._blobs = None
 
         self.nswap = np.zeros(self.ntemps, dtype=np.float)
         self.nswap_accepted = np.zeros(self.ntemps, dtype=np.float)
@@ -209,8 +216,9 @@ class PTSampler(Sampler):
         self._chain = None
         self._lnprob = None
         self._lnlikelihood = None
+        self._blobs = None
 
-    def sample(self, p0, lnprob0=None, lnlike0=None, iterations=1,
+    def sample(self, p0, lnprob0=None, lnlike0=None, blobs0=None, iterations=1,
                thin=1, storechain=True):
         """
         Advance the chains ``iterations`` steps as a generator.
@@ -226,6 +234,10 @@ class PTSampler(Sampler):
         :param lnlike0: (optional)
             The initial likelihood values for the ensembles.  Shape
             ``(ntemps, nwalkers)``.
+
+        :param blobs0: (optional)
+            The initial list or array of metadata blobs for the
+            ensembles. Shape ``(ntemps, nwalkers)``.
 
         :param iterations: (optional)
             The number of iterations to preform.
@@ -246,6 +258,10 @@ class PTSampler(Sampler):
 
         * ``lnlike`` the current likelihood values for the walkers.
 
+        * ``blobs`` - (optional) The metadata "blobs" associated with the
+          current position. The value is only returned if ``logl``
+          returns blobs too.
+
         """
         p = np.copy(np.array(p0))
 
@@ -262,12 +278,28 @@ class PTSampler(Sampler):
                                                                self.nwalkers))
             logps = np.array([r[1] for r in results]).reshape((self.ntemps,
                                                                self.nwalkers))
+            try:
+                blobs = np.array(
+                    [r[0] if not np.isfinite(r[0]) else r[2]
+                     for r in results]).reshape((self.ntemps,
+                                                 self.nwalkers))
+            except IndexError:
+                blobs = None
 
             lnlike0 = logls
             lnprob0 = logls * self.betas.reshape((self.ntemps, 1)) + logps
+            blobs0 = blobs
+
+        elif lnprob0 is not None:
+            assert blobs0 is not None, (
+                "If you start sampling with a given lnprob, you also "
+                "need to provide the current list of blobs at that "
+                "position.")
+            blobs0 = np.asarray(blobs0)
 
         lnprob = lnprob0
         logl = lnlike0
+        blobs = blobs0
 
         # Expand the chain in advance of the iterations
         if storechain:
@@ -279,6 +311,9 @@ class PTSampler(Sampler):
                 self._lnprob = np.zeros((self.ntemps, self.nwalkers, nsave))
                 self._lnlikelihood = np.zeros((self.ntemps, self.nwalkers,
                                                nsave))
+                if blobs is not None:
+                    self._blobs = np.empty((self.ntemps, self.nwalkers,
+                                            nsave), dtype='object')
             else:
                 isave = self._chain.shape[2]
                 self._chain = np.concatenate((self._chain,
@@ -296,6 +331,13 @@ class PTSampler(Sampler):
                                                                self.nwalkers,
                                                                nsave))),
                                                     axis=2)
+                if blobs is not None:
+                    self._blobs = np.concatenate((self._blobs,
+                                                  np.empty((self.ntemps,
+                                                            self.nwalkers,
+                                                            nsave),
+                                                           dtype='object')),
+                                                 axis=2)
 
         for i in range(iterations):
             for j in [0, 1]:
@@ -330,6 +372,11 @@ class PTSampler(Sampler):
                     (self.ntemps, self.nwalkers//2))
                 qslnprob = qslogls * self.betas.reshape((self.ntemps, 1)) \
                     + qslogps
+                if self._blobs is not None:
+                    qsblobs = np.array(
+                        [r[0] if not np.isfinite(r[0]) else r[2]
+                         for r in results]).reshape((self.ntemps,
+                                                     self.nwalkers/2))
 
                 logpaccept = self.dim*np.log(zs) + qslnprob \
                     - lnprob[:, jupdate::2]
@@ -346,6 +393,9 @@ class PTSampler(Sampler):
                     qslnprob.reshape((-1,))[accepts]
                 logl[:, jupdate::2].reshape((-1,))[accepts] = \
                     qslogls.reshape((-1,))[accepts]
+                if self._blobs is not None:
+                    blobs[:, jupdate::2].reshape((-1,))[accepts] = \
+                        qsblobs.reshape((-1,))[accepts]
 
                 accepts = accepts.reshape((self.ntemps, self.nwalkers//2))
 
@@ -359,9 +409,14 @@ class PTSampler(Sampler):
                     self._chain[:, :, isave, :] = p
                     self._lnprob[:, :, isave, ] = lnprob
                     self._lnlikelihood[:, :, isave] = logl
+                    if self._blobs is not None:
+                        self._blobs[:, :, isave] = blobs
                     isave += 1
 
-            yield p, lnprob, logl
+            if blobs is not None:
+                yield p, lnprob, logl, blobs
+            else:
+                yield p, lnprob, logl
 
     def _temperature_swaps(self, p, lnprob, logl):
         """
@@ -485,6 +540,31 @@ class PTSampler(Sampler):
 
         """
         return self._betas
+
+    @property
+    def blobs(self):
+        """
+        Get the list of "blobs" produced by sampling. The result is a list
+        (of length ``iterations``) of ``list`` s (of length ``nwalkers``) of
+        arbitrary objects. **Note**: this will actually be an empty list if
+        your ``lnpostfn`` doesn't return any metadata.
+
+        """
+        return self._blobs
+
+    @property
+    def flatblobs(self):
+        """Get the array of "blobs" produced by sampling flattened along the walker axis.
+        Shape ``(Ntemps, Nwalkers*Nsteps)``.
+        **Note**: this will return None if your ``logl`` doesn't return
+        any metadata.
+
+        """
+        if self.blobs is None:
+            return None
+        else:
+            blob_shape = self.blobs.shape
+            return self._blobs.reshape((blob_shape[0], -1))
 
     @property
     def chain(self):

@@ -244,6 +244,8 @@ class Tests:
         p0 = np.random.multivariate_normal(mean=self.mean, cov=self.cov,
                                            size=(self.ntemp, self.nwalkers))
         self.check_pt_sampler(cutoff, p0=p0, N=1000)
+        # Check blobs don't affect case where logl returns only a float
+        assert (self.sampler.blobs is None)
 
     def test_blobs(self):
         lnprobfn = lambda p: (-0.5 * np.sum(p ** 2), np.random.rand())
@@ -279,3 +281,34 @@ class Tests:
         # None is given and that it records whatever it does
         s.run_mcmc(None, N=self.N)
         assert s.chain.shape[1] == 2 * self.N
+
+    def test_pt_sampler_blobs(self):
+        cutoff = 10.0
+        logl = LogLikeGaussian(self.icov)
+        lnprobfn = lambda p: (logl(p), {'thing1': np.random.rand(),
+                                        'thing2': np.random.rand()})
+        self.sampler = PTSampler(self.ntemp, self.nwalkers,
+                                 self.ndim, lnprobfn,
+                                 LogPriorGaussian(self.icov, cutoff=cutoff))
+
+        p0 = np.random.multivariate_normal(mean=self.mean, cov=self.cov,
+                                           size=(self.ntemp, self.nwalkers))
+
+        self.check_pt_sampler(cutoff, p0=p0, N=1000)
+        # Make sure that the shapes of everything are as expected.
+        assert (self.sampler.chain.shape == (self.ntemp, self.nwalkers,
+                                             self.N, self.ndim)
+                and self.sampler.blobs.shape == (self.ntemp,
+                                                 self.nwalkers,
+                                                 self.N)
+                and self.sampler.blobs[..., 0].shape == (self.ntemp,
+                                                         self.nwalkers)
+                and np.shape(self.sampler.blobs) ==
+                self.sampler.lnprobability.shape
+                and self.sampler.flatblobs.shape == (self.ntemp,
+                                                     self.nwalkers*self.N)), \
+            "The blob dimensions are wrong."
+
+        # Make sure that the blobs aren't all the same.
+        blobs = self.sampler.blobs
+        assert np.any([blobs[-1] != blobs[i] for i in range(len(blobs) - 1)])
