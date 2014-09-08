@@ -262,6 +262,7 @@ class Tests:
         blobs = self.sampler.blobs
         assert np.any([blobs[-1] != blobs[i] for i in range(len(blobs) - 1)])
 
+
     def test_run_mcmc_resume(self):
 
         self.sampler = s = EnsembleSampler(self.nwalkers, self.ndim,
