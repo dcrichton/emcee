@@ -303,7 +303,7 @@ class PTSampler(Sampler):
 
         # Expand the chain in advance of the iterations
         if storechain:
-            nsave = iterations / thin
+            nsave = iterations // thin
             if self._chain is None:
                 isave = 0
                 self._chain = np.zeros((self.ntemps, self.nwalkers, nsave,
@@ -376,7 +376,7 @@ class PTSampler(Sampler):
                     qsblobs = np.array(
                         [r[0] if not np.isfinite(r[0]) else r[2]
                          for r in results]).reshape((self.ntemps,
-                                                     self.nwalkers/2))
+                                                     self.nwalkers//2))
 
                 logpaccept = self.dim*np.log(zs) + qslnprob \
                     - lnprob[:, jupdate::2]
